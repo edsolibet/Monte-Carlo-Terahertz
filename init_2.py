@@ -54,6 +54,7 @@ def where_am_i(layers, dist):
     """
     if dist < 0:
         raise ValueError('Point is outside all layers')
+    d0 = dist
     layer_index = 0
     while layer_index <= (len(layers) - 1):
         current_layer = layers[layer_index]
@@ -63,7 +64,7 @@ def where_am_i(layers, dist):
         else:
             dist -= current_layer.lz
             layer_index+=1
-    raise ValueError('Point is outside all layers. Distance = ' + str(dist))
+    raise ValueError('Point is outside all layers. Distance = ' + str(d0))
 
 
 class GaAs:    
@@ -124,22 +125,22 @@ def inv_debye_len(layer):
 
 class Device:
     ''' Simulation parameters '''
-    dt = 2E-15 # time step
-    pts = 500 # number of time intervals
+    dt = 2.5E-15 # time step
+    pts = 700 # number of time intervals
     
     ''' --- Device geometry and material composition --- '''
 
-    layer0 = Layer(matl=GaAs, dope=1E16, lx = 1E-6, ly = 1E-6, lz=10E-6)
-    layer1 = Layer(matl=GaAs, dope=1E16, lx = 1E-6, ly = 1E-6, lz=10E-6)
+    layer0 = Layer(matl=GaAs, dope=1E16, lx = 5E-6, ly = 5E-6, lz=10E-6)
+    layer1 = Layer(matl=GaAs, dope=1E16, lx = 5E-6, ly = 5E-6, lz=10E-6)
     layers = [layer0]
     Materials = [layer.matl for layer in layers]
     
     # number of particles
-    num_carr = 1000
+    num_carr = 5000
     #electric field
-    elec_field = np.array([0, 0, -10000]) # Ex, Ey, Ez (V/cm)
+    elec_field = np.array([0, 0, -15000]) # Ex, Ey, Ez (V/cm)
     # initial mean energy of particles xkT
-    mean_energy = 10
+    mean_energy = 1.5
     # max energy (eV)
     max_nrg = 2
     # energy divisions
@@ -148,6 +149,14 @@ class Device:
     dfEk = init_energy_df(max_nrg, div)
     #dimensions of device
     dim = [np.array([layer.lx, layer.ly, layer.lz]) for layer in layers]
+        
+class laser:
+    laser_ex = 800 # nm
+    laser_pow = 0.1E-3
+    laser_std = 0.5E-6
+    laser_t = 100E-15
+    laser_eff = (laser_pow*laser_t/(const.q*(1240/laser_ex - Device.Materials[0].EG)))/Device.num_carr
+    t0 = 0.9e-12
     
 def init_coords(layers = Device.layers, num_carr = Device.num_carr, mean_nrg = Device.mean_energy):
     #initialize positions (x, y, z)
@@ -203,12 +212,62 @@ def calc_energy(k, val, mat):
     return E
 
 def show_nrg_pos(coords, mat):
-    val = np.zeros(Device.num_carr).astype(int)
-    nrg = [calc_energy(coords[i][:3], val[i], mat) for i in range(Device.num_carr)]
+    val = np.zeros(len(coords)).astype(int)
+    nrg = [calc_energy(coords[i][:3], val[i], mat) for i in range(len(coords))]
     plt.plot(coords[:, -1], nrg, 'o')
     plt.ylabel("Energy")
     plt.xlabel("Position")
+    
+def show_pos(coords, mat):
+    plt.plot(coords[:, -1]*1e9, coords[:,3]*1e9, 'o')
+    plt.ylabel("x (nm)")
+    plt.xlabel("z (nm)")
 
-
+def init_photoex(dcarr, layers = Device.layers, nrg = 1240/laser.laser_ex):
+    # initialize wave vectors, x1E9 m^-1
+    z = []
+    while len(z) < dcarr:
+        z_ = np.random.exponential(1/layers[0].matl.alpha)
+        if z_ >= 0 and z_ <= layers[0].lz:
+            z.append(z_)
+    z = np.array(z)
+    #z_ndx = z < Device.tot_dim[2]
+    #z = z[z_ndx]
+    x = np.random.normal(0, laser.laser_std, dcarr)
+    #x = x[z_ndx]
+    y = np.random.normal(0, laser.laser_std, dcarr)
+    #y = y[z_ndx]
+    #y = y[y < Device.tot_dim[1]]
+    
+    # Get energy of particles after being excited to conduction band
+    nrg -= layers[0].matl.EG
+    # all particles have the same energy
+    e = np.ones(len(z))*(nrg/(int(laser.laser_eff*Device.num_carr)))
+    
+    #print ("Initializing initial wave vectors (m^-1).")
+    kx = []
+    ky = []
+    kz = []
+    for ndx, i in enumerate(e):
+        #layer_ndx = where_am_i(layers, z[ndx])['current_layer']
+        mat = layers[0].matl
+        # valley index is not always zero
+        k = np.sqrt(2*mat.mass[0]*const.q*i/const.hbar**2) 
+        alpha = np.random.normal(0, 2*np.pi)
+        beta = np.random.normal(0, 2*np.pi)
+        kx.append(k*np.cos(alpha)*np.sin(beta))
+        ky.append(k*np.sin(alpha)*np.sin(beta))
+        kz.append(k*np.cos(beta))
+       
+    coords = np.zeros((dcarr,6))
+    for i in range(len(z)):
+        coords[i][0] = kx[i]
+        coords[i][1] = ky[i]
+        coords[i][2] = kz[i]
+        coords[i][3] = x[i]
+        coords[i][4] = y[i]
+        coords[i][5] = z[i]
+    
+    return coords
 
 

@@ -19,9 +19,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 import init_2, scatter_
 import os, openpyxl
+import scipy.stats as stats
 
 const, dev = init_2.const, init_2.Device
 mat = dev.Materials
+laser = init_2.laser
 dfEk = dev.dfEk
 logging.debug('Parameters loaded')
 
@@ -30,6 +32,7 @@ scat_cond = True
 save_cond = False
 drift_cond = True
 free_flight_cond = False
+photoex_cond = False
 
 ''' --- Initialization --- '''
 # ini_coords: 1 x 6 x num_carr arrays for kx, ky, kz, x, y, z v
@@ -43,12 +46,10 @@ if scat_cond:
 if len(ini_coords) == len(valley) and len(ini_coords) >0:
     logging.debug('Initial coordinates and valley assignments generated.')
 
-# Generate Excel file
 dirPath = 'C:/Users/Carlo/OneDrive/Research/Terahertz/Python Codes/MC Simulation/'
 folderName = 'Simulation Results'
 os.chdir(dirPath + folderName)
 keyword = "Steady-state Transport Kernel"
-
 
 ''' --- Functions --- '''
 
@@ -162,25 +163,52 @@ def carrier_drift(coord, elec_field, dt2, mass):
     return coord
 
 
-    
+  
 ''' --- Main Monte Carlo Transport Sequence --- '''
+# Generate quantity list placeholders num_carr (rows) x pts (columns)
+t_range = [i * dev.dt for i in range(1, dev.pts)]
+vz_hist = np.zeros((dev.num_carr, dev.pts))
+v_hist = np.zeros((dev.num_carr, dev.pts))
+z_hist = np.zeros((dev.num_carr, dev.pts))
+e_hist = np.zeros((dev.num_carr, dev.pts))
+val_hist = np.zeros((dev.num_carr, dev.pts))
+jz_hist = np.zeros((dev.num_carr, dev.pts))
+num_carr = dev.num_carr
+for carr in range(num_carr):
+    mat_i = where_am_i(dev.layers, coords[carr][5])['current_layer']
+    e_hist[carr][0] = calc_energy(coords[carr][:3], int(valley[carr]), mat[mat_i])[0]
+    vz_hist[carr][0] = coords[carr][2]*const.hbar/mat[mat_i].mass[int(valley[carr])]
+    v_hist[carr][0] = np.sqrt(np.sum(np.square(coords[carr][:3])))*const.hbar/mat[mat_i].mass[int(valley[carr])]
+    z_hist[carr][0] = coords[carr][5]
+# Generate initial free flight durations for all particles
+dtau = [free_flight(dev.layers[0].matl.tot_scat) for i in range(dev.num_carr)]
+dcarr_0 = 0
+
 if drift_cond:
-    # Generate quantity list placeholders num_carr (rows) x pts (columns)
-    t_range = [i * dev.dt for i in range(dev.pts)]
-    v_hist = np.zeros((dev.num_carr, dev.pts))
-    x_hist = np.zeros((dev.num_carr, dev.pts))
-    y_hist = np.zeros((dev.num_carr, dev.pts))
-    z_hist = np.zeros((dev.num_carr, dev.pts))
-    e_hist = np.zeros((dev.num_carr, dev.pts))
-    val_hist = np.zeros((dev.num_carr, dev.pts))
-
-    # Generate initial free flight durations for all particles
-    dtau = [free_flight(dev.Materials[0].tot_scat) for i in range(dev.num_carr)]
-
-    for c, t in enumerate(t_range):
+    for c, t in enumerate(t_range, start = 1):
         logging.debug('Time: %0.4g' %t)
+        # number of carriers to be added from photoexcitation 
+        if photoex_cond:
+            if t == laser.t0:
+                #dcarr = int(num_carr*(1+laser.laser_eff*stats.norm.cdf(t, laser.t0 + 3*laser.laser_t, laser.laser_t))-num_carr)
+                dcarr = int(laser.laser_eff*dev.num_carr)
+                # add carriers
+                coords = np.append(coords, init_2.init_photoex(dcarr, dev.layers, 1240/laser.laser_ex), axis = 0)
+                # add corresponding amounts of valley states for added carriers
+                valley = np.append(valley, np.zeros(dcarr), axis = 0)
+                # Add free_flight durations for new photoexcited carriers
+                dtau = np.append(dtau, [free_flight(dev.layers[0].matl.tot_scat) for i in range(dcarr)], axis = 0)
+                # Update length of quantity arrays
+                vz_hist = np.append(vz_hist, np.zeros((dcarr, vz_hist.shape[1])), axis = 0)
+                v_hist = np.append(v_hist, np.zeros((dcarr, v_hist.shape[1])), axis = 0)
+                z_hist = np.append(z_hist, np.zeros((dcarr, z_hist.shape[1])), axis = 0)
+                e_hist = np.append(e_hist, np.zeros((dcarr, e_hist.shape[1])), axis = 0)
+                jz_hist = np.append(jz_hist, np.zeros((dcarr, jz_hist.shape[1])), axis = 0)
+                val_hist = np.append(val_hist, np.zeros((dcarr, val_hist.shape[1])), axis = 0)
+                # Update number of carriers
+                num_carr += dcarr
         # Start transport sequence, iterate over each particle
-        for carr in range(dev.num_carr):
+        for carr in range(num_carr):
             dte = dtau[carr]
             # time of flight longer than time interval dt
             if dte >= dev.dt:
@@ -216,17 +244,21 @@ if drift_cond:
             coords[carr] = drift_coords
             mat_i = where_am_i(dev.layers, drift_coords[5])['current_layer']
             e_hist[carr][c] = calc_energy(drift_coords[:3], int(valley[carr]), mat[mat_i])[0]
-#            v_hist[carr][c] = drift_coords[2]*const.hbar/mat[mat_i].mass[int(valley[carr])]
-            v_hist[carr][c] = np.sqrt(2*const.q*e_hist[carr][c]/mat[mat_i].mass[int(valley[carr])])
+            vz_hist[carr][c] = drift_coords[2]*const.hbar/mat[mat_i].mass[int(valley[carr])]
+            v_hist[carr][c] = np.sqrt(np.sum(np.square(drift_coords[:3])))*const.hbar/mat[mat_i].mass[int(valley[carr])]
+            jz_hist[carr][c] = (vz_hist[carr][c] - vz_hist[carr][c-1])/(dev.dt)
             z_hist[carr][c] = drift_coords[5]
             val_hist[carr][c] = valley[carr]
         
     ''' --- Plots --- '''
+    t_range.insert(0,0) # fix size of t_range
     fig1, ax1 = plt.subplots()
-    ax1.plot(np.array(t_range)*1E12, v_hist.mean(axis=0))
+    ax1.plot(np.array(t_range)*1E12, vz_hist.mean(axis=0), label = "Vz")
+    ax1.plot(np.array(t_range)*1E12, v_hist.mean(axis=0), label = "V")
     ax1.set_xlabel('Time (ps)')
     ax1.set_ylabel('Mean Velocity (m/s)')
     ax1.set_xlim([0, t_range[-1]*1E12])
+    ax1.legend(loc = "best")
     
     fig2, ax2 = plt.subplots()
     ax2.plot(np.array(t_range)*1E12, e_hist.mean(axis = 0))
@@ -267,10 +299,17 @@ if drift_cond:
     fig4, ax4 = plt.subplots()
 #    fin_nrg = [calc_energy(coords[i,:3], valley[i], mat[where_am_i(dev.layers, coords[i][5])['current_layer']])[0]] 
 #        for i in range(dev.num_carr)]
-    ax4.plot(coords[:,5], e_hist[:, -1], 'o')
+    ax4.plot(coords[:,-1], e_hist[:, -1], 'o')
     ax4.set_xlabel("z-axis")
     ax4.set_ylabel("Energy, eV")
 #    ax4.set_ylim([0, 1])
+    
+    if photoex_cond:
+        fig5, ax5 = plt.subplots()
+        ax5.plot(np.array(t_range)*1e12, jz_hist.mean(axis=0))
+        ax5.set_xlabel('Time (ps)')
+        ax5.set_ylabel('Photocurrent')
+        ax5.set_xlim([0, t_range[-1]*1E12])
     
 
 ''' --- End Simulation --- '''
@@ -283,9 +322,13 @@ print ("Time finished: ", endTime.strftime("%d-%m-%Y %H:%M:%S"))
 
 
 
-def save_results():
-    
+def save_results(key = None):
+    # Generate Excel file
     num = 1
+    if key is not None:
+        keyword = key
+    else:
+        keyword = keyword
     while True:
         filename = datetime.datetime.today().strftime("%Y-%m-%d") + ' ' + keyword + \
         ' (' + str(num) + ').xlsx'
@@ -299,11 +342,12 @@ def save_results():
     for c, t in enumerate(t_range):
         sheet['A' + str(c + 2)] = t*1E12
         sheet['B' + str(c+2)] = np.mean(z_hist[:,c])*1E9
-        sheet['C' + str(c+2)] = np.mean(v_hist[:,c])
-        sheet['D' + str(c+2)] = np.mean(e_hist[:,c])
-        sheet['E' + str(c+2)] = G_val[c]
-        sheet['F' + str(c+2)] = L_val[c]
-        sheet['G' + str(c+2)] = X_val[c]
+        sheet['C' + str(c+2)] = np.mean(vz_hist[:,c])
+        sheet['D' + str(c+2)] = np.mean(v_hist[:,c])
+        sheet['E' + str(c+2)] = np.mean(e_hist[:,c])
+        sheet['F' + str(c+2)] = G_val[c]
+        sheet['G' + str(c+2)] = L_val[c]
+        sheet['H' + str(c+2)] = X_val[c]
         
     ''' --- Excel Workbook Inputs --- '''
         
@@ -318,21 +362,22 @@ def save_results():
     # Series Heading titles
     sheet['A1'] = 'Time (ps)'
     sheet['B1'] = 'Average z pos. (nm)'
-    sheet['C1'] = 'Average velocity (m/s)'
-    sheet['D1'] = 'Average energy (eV)'
-    sheet['E1'] = 'Gamma-Valley Population'
-    sheet['F1'] = 'L-Valley Population'
-    sheet['G1'] = 'X-Valley Population'
+    sheet['C1'] = 'Average z-axis velocity (m/s)'
+    sheet['D1'] = 'Average velocity (m/s)'
+    sheet['E1'] = 'Average energy (eV)'
+    sheet['F1'] = 'Gamma-Valley Population'
+    sheet['G1'] = 'L-Valley Population'
+    sheet['H1'] = 'X-Valley Population'
     
     for i, key in enumerate(list(xl_input.keys())):
-        sheet['I' + str(i+2)] = key
-        sheet['J' + str(i+2)] = xl_input[key]
-    sheet['I' + str(len(xl_input.keys()) + 1)] = 'Actual Simulation Time'
-    sheet['J' + str(len(xl_input.keys()) + 1)] = f'{mins} mins, {secs:.2f} s'
+        sheet['J' + str(i+2)] = key
+        sheet['K' + str(i+2)] = xl_input[key]
+    sheet['J' + str(len(xl_input.keys()) + 1)] = 'Actual Simulation Time'
+    sheet['K' + str(len(xl_input.keys()) + 1)] = f'{mins} mins, {secs:.2f} s'
     
     
     # Set column width and freeze first row
-    sheet.column_dimensions['I'].width = 21
+    sheet.column_dimensions['J'].width = 21
     sheet.freeze_panes = 'A2'
     wb.save(os.getcwd() + '\\' + filename)
     
