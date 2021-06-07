@@ -20,6 +20,8 @@ import matplotlib.pyplot as plt
 import init_2, scatter_
 import os, openpyxl
 import scipy.stats as stats
+import pandas as pd
+import band_diagram as bd
 
 const, dev = init_2.const, init_2.Device
 mat = dev.Materials
@@ -39,6 +41,12 @@ photoex_cond = False
 ini_coords = init_2.init_coords()
 coords = np.copy(ini_coords)
 valley = np.zeros(dev.num_carr).astype(int)
+# Generate grid with coordinates at centers of cells
+grid, meff, eps = init_2.generate_grids(dev)
+elec_field, Evac = bd.example1(dev.layers, len(grid))
+elec_field = np.array(elec_field)*1e3*1e2
+fig, ax = plt.subplots()
+ax.plot(grid, elec_field)
 
 
 if scat_cond:
@@ -49,7 +57,20 @@ if len(ini_coords) == len(valley) and len(ini_coords) >0:
 dirPath = 'C:/Users/Carlo/OneDrive/Research/Terahertz/Python Codes/MC Simulation/'
 folderName = 'Simulation Results'
 os.chdir(dirPath + folderName)
-keyword = "Steady-state Transport Kernel"
+
+def key(dev, photoex_cond):
+    mat = ""
+    for i in dev.Materials:
+        mat += str(i.name)
+    carr = str(dev.num_carr)
+    ef = str(dev.elec_field[-1])
+    t = str(dev.dt*dev.pts)
+    if photoex_cond:
+        return mat + "_" + carr + "_" + ef + "_" + t + "_photoex"
+    else:
+        return mat + "_" + carr + "_" + ef + "_" + t
+
+keyword = key(dev, photoex_cond)
 
 ''' --- Functions --- '''
 
@@ -138,9 +159,10 @@ def carrier_drift(coord, elec_field, dt2, mass):
     
     k = coord[:3]
     r = coord[3:]
+    ef = elec_field[np.where((abs(grid - r[-1]) < dev.dl[2]) == True)[0][0]]
     
-    k += - const.q*dt2*elec_field*1e2/const.hbar # elec field in V/m
-    r += (const.hbar*k - 0.5*const.q*elec_field*1e2*dt2)*(dt2/mass)
+    k += - const.q*dt2*ef*1e2/const.hbar # elec field in V/m
+    r += (const.hbar*k - 0.5*const.q*ef*1e2*dt2)*(dt2/mass)
     #ndx = where_am_i(dev.layers, r_[2])['current_layer']
     # checks if cyclic boundary conditions are satisfied
     #r_ = cyclic_boundary(r_, dev.tot_dim)
@@ -162,7 +184,31 @@ def carrier_drift(coord, elec_field, dt2, mass):
         raise Exception('Invalid wavevector coordinates')
     return coord
 
-
+def poisson_ef(coords, dev, grid):
+    
+    def fd(psi, dl):
+        psi_ = np.pad(psi, 1, 'edge')
+        res = [-(psi_[j+1] - psi_[j-1])/(2*dl*100) for j in range(1, len(psi) + 1)]
+        return res
+    
+    def get_near(x):
+        sub = abs(dfmesh - x) <= dev.dl[2]/2
+        try:
+            rho[list(np.where(sub==True)[0])] += dev.Materials[0].dope*(100**3)*const.q/(dev.num_carr*dev.Materials[0].eps_0)
+        except:
+            pass
+    
+    dfpos = pd.DataFrame(list(coords[:,5].T))
+    dfmesh = pd.DataFrame(list(grid))
+    rho = np.zeros(len(dfmesh))#*dev.Materials[0].dope*np.prod(dev.dl)*(-100**3)
+    dfpos.apply(get_near, axis = 1)
+    H = np.diag([1] + [-2]*(len(rho)-2) + [1]) + np.diag([1]*(len(rho) - 2) + [0], -1) + np.diag([0] + [1]*(len(rho) - 2), 1)
+    w = rho*dev.dl[2]**2/dev.Materials[0].eps_0
+    w[0] = dev.elec_field[2]*dev.dl[2]*100
+    w[-1] = 0
+    psi = np.linalg.solve(H,w)
+    ef = fd(psi, dev.dl[2])
+    return ef
   
 ''' --- Main Monte Carlo Transport Sequence --- '''
 # Generate quantity list placeholders num_carr (rows) x pts (columns)
@@ -215,13 +261,13 @@ if drift_cond:
                 dt2 = dev.dt
                 # get elec field at coordinate
                 mat_i = where_am_i(dev.layers, coords[carr][5])['current_layer']
-                drift_coords = carrier_drift(coords[carr], dev.elec_field, dt2, mat[mat_i].mass[int(valley[carr])])
+                drift_coords = carrier_drift(coords[carr], elec_field, dt2, mat[mat_i].mass[int(valley[carr])])
             # time of flight shorter than time interval dt
             else:
                 dt2 = dte
                 # get elec field at coordinate
                 mat_i = where_am_i(dev.layers, coords[carr][5])['current_layer']
-                drift_coords = carrier_drift(coords[carr], dev.elec_field, dt2, mat[mat_i].mass[int(valley[carr])])
+                drift_coords = carrier_drift(coords[carr], elec_field, dt2, mat[mat_i].mass[int(valley[carr])])
                 # iterate free flight until approaching dt
                 while dte < dev.dt:
                     dte2 = dte
@@ -237,7 +283,7 @@ if drift_cond:
                         dt2 = dtp
                     # get elec field at coordinate
                     mat_i = where_am_i(dev.layers, drift_coords[5])['current_layer']
-                    drift_coords = carrier_drift(drift_coords, dev.elec_field, dt2, mat[mat_i].mass[int(valley[carr])])
+                    drift_coords = carrier_drift(drift_coords, elec_field, dt2, mat[mat_i].mass[int(valley[carr])])
                     dte = dte2 + dt3
             dte -= dev.dt
             dtau[carr] = dte
@@ -284,18 +330,6 @@ if drift_cond:
     ax3.set_ylabel('Valley population')
     ax3.set_xlim([0, t_range[-1]*1E12])
     
-    if save_cond:
-        num = 1
-        while True:
-            filename = datetime.datetime.today().strftime("%Y-%m-%d") + ' ' + keyword + \
-            ' (' + str(num) + ').xlsx'
-            if not os.path.exists(filename):
-                break
-            num += 1
-        ax1.savefig(filename)
-        ax2.savefig(filename)
-        ax3.savefig(filename)
-    
     fig4, ax4 = plt.subplots()
 #    fin_nrg = [calc_energy(coords[i,:3], valley[i], mat[where_am_i(dev.layers, coords[i][5])['current_layer']])[0]] 
 #        for i in range(dev.num_carr)]
@@ -303,6 +337,19 @@ if drift_cond:
     ax4.set_xlabel("z-axis")
     ax4.set_ylabel("Energy, eV")
 #    ax4.set_ylim([0, 1])
+    
+#    if save_cond:
+#        num = 1
+#        while True:
+#            filename = datetime.datetime.today().strftime("%Y-%m-%d") + ' ' + keyword + \
+#            ' (' + str(num) + ').xlsx'
+#            if not os.path.exists(filename):
+#                break
+#            num += 1
+#        ax1.savefig(filename)
+#        ax2.savefig(filename)
+#        ax3.savefig(filename)
+#        ax4.savefig(filename)
     
     if photoex_cond:
         fig5, ax5 = plt.subplots()
@@ -322,13 +369,13 @@ print ("Time finished: ", endTime.strftime("%d-%m-%Y %H:%M:%S"))
 
 
 
-def save_results(key = None):
+def save_results():
     # Generate Excel file
     num = 1
-    if key is not None:
-        keyword = key
-    else:
-        keyword = keyword
+#    if key is not None:
+#        keyword = key
+#    else:
+#        keyword = keyword
     while True:
         filename = datetime.datetime.today().strftime("%Y-%m-%d") + ' ' + keyword + \
         ' (' + str(num) + ').xlsx'
@@ -374,12 +421,26 @@ def save_results(key = None):
         sheet['K' + str(i+2)] = xl_input[key]
     sheet['J' + str(len(xl_input.keys()) + 1)] = 'Actual Simulation Time'
     sheet['K' + str(len(xl_input.keys()) + 1)] = f'{mins} mins, {secs:.2f} s'
-    
-    
+        
     # Set column width and freeze first row
     sheet.column_dimensions['J'].width = 21
     sheet.freeze_panes = 'A2'
     wb.save(os.getcwd() + '\\' + filename)
+    num = 1
+    
+    os.chdir(dirPath + folderName + "/Figures")
+    while True:
+        filename = datetime.datetime.today().strftime("%Y-%m-%d") + ' ' + keyword
+        if not os.path.exists(filename):
+            break
+        num += 1
+    ext = ' (' + str(num) + ').jpg'
+    fig1.savefig(filename + 'velocity' + ext)
+    fig2.savefig(filename + 'energy' + ext)
+    fig3.savefig(filename + 'valley' + ext)
+    fig4.savefig(filename + 'nrgpos' + ext)
+    if photoex_cond:
+        fig5.savefig(filename + 'photoex' + ext)
     
 
 if save_cond:
